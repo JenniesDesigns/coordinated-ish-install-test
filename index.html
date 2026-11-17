@@ -5,6 +5,28 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#101421">
 <title>Coordinated-ish</title>
+<style id="ccStartupStyle">
+html[data-cc-startup] body > :not(#ccStartup):not(script):not(style){visibility:hidden!important}
+#ccStartup{position:fixed;inset:0;z-index:2147483000;display:grid;place-items:center;background:#101421;color:#f2f3fa;font:16px/1.55 system-ui,-apple-system,Segoe UI,sans-serif;padding:24px}
+#ccStartup[hidden]{display:none!important}
+#ccStartup .cc-startup-card{width:min(420px,100%);text-align:center}
+#ccStartup h1{font-size:28px;color:#f2f3fa;margin:16px 0}
+#ccStartup p{color:#cbd2e2}
+#ccStartup button{font:inherit;padding:10px 15px;margin:6px;border:1px solid #a879ff;border-radius:10px;background:#192238;color:#fff;cursor:pointer}
+#ccStartup .cc-startup-mark{font-size:38px;color:#a879ff}
+</style>
+<script>
+// Set before the body paints, so neither sign-in nor the default theme flashes.
+document.documentElement.setAttribute('data-cc-startup','');
+window.ccStartupUI = {
+ timer:null,
+ begin(message){document.documentElement.setAttribute('data-cc-startup','');const box=document.getElementById('ccStartup');if(box){box.hidden=false;box.setAttribute('aria-busy','true');document.getElementById('ccStartupMessage').textContent=message||'Gathering your plans and personality…';document.getElementById('ccStartupActions').hidden=true;}clearTimeout(this.timer);this.timer=setTimeout(()=>this.fail('Startup is taking longer than expected. Check your connection and try again.'),60000);},
+ finish(){clearTimeout(this.timer);document.documentElement.removeAttribute('data-cc-startup');const box=document.getElementById('ccStartup');if(box){box.hidden=true;box.setAttribute('aria-busy','false');}},
+ fail(message){clearTimeout(this.timer);const box=document.getElementById('ccStartup');if(!box)return;box.hidden=false;box.setAttribute('aria-busy','false');document.getElementById('ccStartupMessage').textContent=message;document.getElementById('ccStartupActions').hidden=false;}
+};
+window.ccStartupUI.timer=setTimeout(()=>window.ccStartupUI.fail('We could not finish opening your planner. Check your connection and try again.'),60000);
+</script>
+
 <!-- Coordinated-ish installable app -->
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png">
@@ -512,6 +534,12 @@ body[data-theme="everyday"] .hero:after,body[data-theme="sanctuary"] .hero:after
 .cc-page-footer[hidden]{display:none}
 </style></head>
 <body>
+<div id="ccStartup" role="status" aria-live="polite" aria-busy="true">
+ <div class="cc-startup-card"><div class="cc-startup-mark" aria-hidden="true">☾ ✦</div><h1>Coordinated-ish</h1><p id="ccStartupMessage">Gathering your plans and personality…</p>
+ <div id="ccStartupActions" hidden><button type="button" onclick="location.reload()">Try again</button><button type="button" id="ccStartupSignIn">Back to sign in</button></div></div>
+</div>
+<noscript><style>html[data-cc-startup] body > :not(#ccStartup){visibility:visible!important}#ccStartup{display:none!important}</style><p>Enable JavaScript to use Coordinated-ish.</p></noscript>
+
 
 <style>
 #authGate{position:fixed;inset:0;z-index:50;background:radial-gradient(ellipse at 85% 0%,#39204b77,transparent 32%),#0b0e18;display:grid;place-items:center;padding:20px}
@@ -1313,23 +1341,33 @@ const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_85J_B7ktksZwn5EZsGswsQ_PWjvSb8R
 const SESSION_KEY = "chaos_coordinator_session_v5";
 let accessToken = null;
 
+let ccStartupInFlight=false;
+let ccStartupRequestError=null;
+let ccRefreshPromise=null;
+let ccRefreshInvalid=false;
 async function supabaseRequest(path, options = {}, retry = true) {
   const controller=new AbortController();
   const timer=setTimeout(()=>controller.abort(),15000);
-  const headers={apikey:SUPABASE_PUBLISHABLE_KEY,"Content-Type":"application/json",...(options.headers||{})};
-  if(accessToken) headers.Authorization=`Bearer ${accessToken}`;
-  const res=await fetch(SUPABASE_URL+path,{...options,headers,signal:controller.signal});
-  clearTimeout(timer);
-  const text=await res.text();
-  let data=null;
-  if(text){try{data=JSON.parse(text)}catch{data=text}}
-  if((res.status===401||res.status===403)&&retry&&currentUser){
-    const renewed=await refreshSession();
-    if(renewed) return supabaseRequest(path,options,false);
-  }
-  if(!res.ok) throw new Error(data?.msg||data?.message||data?.error_description||data?.error||`Request failed (${res.status})`);
-  return data;
+  try {
+    const headers={apikey:SUPABASE_PUBLISHABLE_KEY,"Content-Type":"application/json",...(options.headers||{})};
+    if(accessToken) headers.Authorization=`Bearer ${accessToken}`;
+    const res=await fetch(SUPABASE_URL+path,{...options,headers,signal:controller.signal});
+    const text=await res.text();
+    let data=null;
+    if(text){try{data=JSON.parse(text)}catch{data=text}}
+    if(res.status===401&&retry&&currentUser){
+      const renewed=await refreshSession();
+      if(renewed)return supabaseRequest(path,options,false);
+      if(!ccRefreshInvalid)throw new Error("Unable to reconnect to your account. Please try again.");
+    }
+    if(!res.ok){const error=new Error(data?.msg||data?.message||data?.error_description||data?.error||`Request failed (${res.status})`);error.status=res.status;throw error;}
+    return data;
+  } catch(error) {
+    if(ccStartupInFlight)ccStartupRequestError=error;
+    throw error;
+  } finally {clearTimeout(timer);}
 }
+
 function saveSession(data) {
   if (data?.access_token) {
     accessToken = data.access_token;
@@ -1344,7 +1382,7 @@ function restoreSession() {
   try {
     const s = JSON.parse(localStorage.getItem(SESSION_KEY) || "null");
     if (s?.access_token) { accessToken = s.access_token; return s; }
-  } catch (_) {}
+  } catch (_) { clearSession(); }
   return null;
 }
 
@@ -3147,16 +3185,26 @@ document.getElementById("nextPaydayPicker").addEventListener("click",()=>{
 
 // ---- Session refresh (v7.2) ----
 async function refreshSession(){
-  const saved=JSON.parse(localStorage.getItem("chaos_coordinator_session_v5")||"null");
-  if(!saved?.refresh_token)return false;
-  try{
+  if(ccRefreshPromise)return ccRefreshPromise;
+  ccRefreshPromise=(async()=>{
+    ccRefreshInvalid=false;
+    let saved;
+    try{saved=JSON.parse(localStorage.getItem(SESSION_KEY)||"null");}
+    catch(_){ccRefreshInvalid=true;return false;}
+    if(!saved?.refresh_token){ccRefreshInvalid=true;return false;}
     const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),15000);
-    const res=await fetch(SUPABASE_URL+"/auth/v1/token?grant_type=refresh_token",{method:"POST",headers:{"apikey":SUPABASE_PUBLISHABLE_KEY,"Content-Type":"application/json"},body:JSON.stringify({refresh_token:saved.refresh_token}),signal:controller.signal});
-    clearTimeout(timer);const data=await res.json();if(!res.ok||!data.access_token)return false;
-    saveSession(data);accessToken=data.access_token;currentUser=data.user||currentUser;return true
-  }catch(err){console.error("Session refresh failed",err);return false}
+    try{
+      const res=await fetch(SUPABASE_URL+"/auth/v1/token?grant_type=refresh_token",{method:"POST",headers:{apikey:SUPABASE_PUBLISHABLE_KEY,"Content-Type":"application/json"},body:JSON.stringify({refresh_token:saved.refresh_token}),signal:controller.signal});
+      const data=await res.json();
+      if(!res.ok||!data.access_token){ccRefreshInvalid=[400,401,403].includes(res.status);return false;}
+      saveSession(data);currentUser=data.user||currentUser;return true;
+    }catch(error){console.error('Session refresh failed',error);return false;}
+    finally{clearTimeout(timer);}
+  })();
+  try{return await ccRefreshPromise;}finally{ccRefreshPromise=null;}
 }
-setInterval(()=>{if(currentUser)refreshSession()},45*60*1000);
+setInterval(()=>{if(currentUser&&!ccStartupInFlight)refreshSession()},45*60*1000);
+
 
 
 
@@ -3803,15 +3851,36 @@ document.getElementById("callCompletedToggle").addEventListener("click",()=>{
 });
 
 async function startApp(user){
+  if(ccStartupInFlight)return;
+  ccStartupInFlight=true;ccStartupRequestError=null;ccRefreshInvalid=false;
+  window.ccStartupUI.begin();
   currentUser=user;
-  if(userEmail) userEmail.textContent=user.email||"Account";
-  authGate.style.display="none";
-  await loadSpaces();
-  await loadUserSettings();
-  await Promise.all([loadEvents(),loadGoals(),loadChores(),loadProjects(),loadFood(),loadMealPlans(),loadBills(),loadDebts(),loadSavings(),loadPaydaySettings(),loadSpending(),ccLoadReminders(),ccLoadCalls()]);
-  await migrateLegacyChores();
-  await loadHousekeepingSettings();
-  renderChores();renderLiveDashboard();
+  try {
+    if(userEmail)userEmail.textContent=user.email||"Account";
+    await loadSpaces();
+    await loadUserSettings();
+    const results=await Promise.allSettled([loadEvents(),loadGoals(),loadChores(),loadProjects(),loadFood(),loadMealPlans(),loadBills(),loadDebts(),loadSavings(),loadPaydaySettings(),loadSpending(),ccLoadReminders(),ccLoadCalls()]);
+    const failed=results.find(result=>result.status==='rejected');
+    if(failed)throw failed.reason;
+    // Older loaders catch their own network errors; don't reveal a false empty dashboard.
+    if(ccStartupRequestError)throw ccStartupRequestError;
+    await migrateLegacyChores();
+    await loadHousekeepingSettings();
+    if(ccStartupRequestError)throw ccStartupRequestError;
+    renderChores();renderLiveDashboard();
+    await Promise.race([Promise.all(Array.from(document.images).filter(image=>image.getClientRects().length&&image.decode).map(image=>image.decode().catch(()=>{}))),new Promise(resolve=>setTimeout(resolve,2500))]);
+    authGate.style.display="none";
+    window.ccStartupUI.finish();
+  } catch(error) {
+    console.error('Planner startup failed',error);
+    if(error.status===401||ccRefreshInvalid){
+      clearSession();currentUser=null;authGate.style.display='grid';
+      setAuthMessage('Your session has expired. Please sign in again.',true);
+      window.ccStartupUI.finish();
+    }else{
+      window.ccStartupUI.fail('We could not finish loading your planner. Check your connection and try again, or return to sign in.');
+    }
+  } finally {ccStartupInFlight=false;}
 }
 
 document.getElementById("signOutBtn").addEventListener("click",()=>{
@@ -3826,7 +3895,7 @@ document.getElementById("mobileSignOutBtn").addEventListener("click",()=>{
 
 let ccLastCloudRefresh=0;
 async function refreshCloudView(){
-  if(!currentUser)return;
+  if(!currentUser||ccStartupInFlight||document.documentElement.hasAttribute("data-cc-startup"))return;
   const now=Date.now();
   if(now-ccLastCloudRefresh<5000)return;
   ccLastCloudRefresh=now;
@@ -3848,12 +3917,43 @@ if(mealMobileToggle)mealMobileToggle.addEventListener("click",()=>{
 // Recovery links take precedence over any previously saved session.
 const ccLinkType = new URLSearchParams(location.hash.slice(1)).get("type") || new URLSearchParams(location.search).get("type");
 const ccRecoveryPending = ccLinkType === "recovery" || ccLinkType === "invite";
-if (ccRecoveryPending) {
-  ccHandleRecoveryLink();
-} else {
+// Wait until every declaration in the main script has initialized.
+document.addEventListener('DOMContentLoaded', async()=>{
+  document.getElementById('ccStartupSignIn').addEventListener('click',()=>{
+    // Reload after removing only the session, cancelling outstanding startup work.
+    clearSession();location.reload();
+  });
+  if(ccRecoveryPending){
+    window.ccStartupUI.finish();
+    ccHandleRecoveryLink();return;
+  }
   const restored=restoreSession();
-  if(restored?.user) startApp(restored.user);
-}
+  if(!restored){window.ccStartupUI.finish();return;}
+  try{
+    let verified;
+    try{verified=await supabaseRequest('/auth/v1/user',{},false);}
+    catch(error){
+      if(error.status!==401)throw error;
+      if(!await refreshSession()){
+        if(ccRefreshInvalid){error.status=401;throw error;}
+        throw new Error('Unable to reconnect to your account.');
+      }
+      verified=await supabaseRequest('/auth/v1/user',{},false);
+    }
+    if(!verified?.id)throw new Error('Account verification did not return a user.');
+    await startApp(verified);
+  }catch(error){
+    console.error('Session restoration failed',error);
+    if(error.status===401||ccRefreshInvalid){
+      clearSession();currentUser=null;authGate.style.display='grid';
+      setAuthMessage('Your session has expired. Please sign in again.',true);
+      window.ccStartupUI.finish();
+    }else{
+      window.ccStartupUI.fail('We could not reconnect to your account. Check your internet connection and try again.');
+    }
+  }
+},{once:true});
+
 
 
 
