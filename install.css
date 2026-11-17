@@ -1,0 +1,10 @@
+
+.cc-install-button{display:block;margin:12px 0;padding:9px 14px;border:1px solid var(--teal,#42e0d0);border-radius:10px;background:var(--panel,#141a2a);color:var(--text,#f2f3fa);font:inherit;cursor:pointer}
+.cc-install-button[hidden]{display:none!important}
+#ccInstallDialog{width:min(430px,calc(100vw - 32px));border:1px solid #a879ff;border-radius:16px;background:#141a2a;color:#f2f3fa;padding:24px;line-height:1.5;z-index:10000}
+#ccInstallDialog::backdrop{background:#000a}
+#ccInstallDialog h2{margin-top:0;font-size:21px}
+#ccInstallDialog button{padding:8px 14px;border-radius:8px;border:1px solid #42e0d0;background:#192238;color:#f2f3fa;font:inherit}
+
+.cc-install-mobile{display:none}
+@media(max-width:900px){.cc-install-mobile{display:block;font-size:12px;padding:8px;margin:0;max-width:135px;flex-shrink:0}}
