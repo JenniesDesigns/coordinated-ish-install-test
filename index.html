@@ -535,7 +535,7 @@ body[data-theme="everyday"] .hero:after,body[data-theme="sanctuary"] .hero:after
 </style></head>
 <body>
 <div id="ccStartup" role="status" aria-live="polite" aria-busy="true">
- <div class="cc-startup-card"><div class="cc-startup-mark" aria-hidden="true">☾ ✦</div><h1>Coordinated-ish</h1><p id="ccStartupMessage">Gathering your plans and personality…</p>
+ <div class="cc-startup-card"><div class="cc-startup-mark" aria-hidden="true">☾ ✦</div><h1>Coordinated-ish</h1><p style="font-size:12px;opacity:.7">Startup check 2</p><p id="ccStartupMessage">Gathering your plans and personality…</p>
  <div id="ccStartupActions" hidden><button type="button" onclick="location.reload()">Try again</button><button type="button" id="ccStartupSignIn">Back to sign in</button></div></div>
 </div>
 <noscript><style>html[data-cc-startup] body > :not(#ccStartup){visibility:visible!important}#ccStartup{display:none!important}</style><p>Enable JavaScript to use Coordinated-ish.</p></noscript>
@@ -1345,6 +1345,7 @@ let ccStartupInFlight=false;
 let ccStartupRequestError=null;
 let ccRefreshPromise=null;
 let ccRefreshInvalid=false;
+let ccRefreshReason="";
 async function supabaseRequest(path, options = {}, retry = true) {
   const controller=new AbortController();
   const timer=setTimeout(()=>controller.abort(),15000);
@@ -3187,18 +3188,18 @@ document.getElementById("nextPaydayPicker").addEventListener("click",()=>{
 async function refreshSession(){
   if(ccRefreshPromise)return ccRefreshPromise;
   ccRefreshPromise=(async()=>{
-    ccRefreshInvalid=false;
+    ccRefreshInvalid=false;ccRefreshReason="";
     let saved;
     try{saved=JSON.parse(localStorage.getItem(SESSION_KEY)||"null");}
-    catch(_){ccRefreshInvalid=true;return false;}
-    if(!saved?.refresh_token){ccRefreshInvalid=true;return false;}
+    catch(_){ccRefreshInvalid=true;ccRefreshReason="SESSION-STORAGE";return false;}
+    if(!saved?.refresh_token){ccRefreshInvalid=true;ccRefreshReason="SESSION-MISSING-REFRESH";return false;}
     const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),15000);
     try{
       const res=await fetch(SUPABASE_URL+"/auth/v1/token?grant_type=refresh_token",{method:"POST",headers:{apikey:SUPABASE_PUBLISHABLE_KEY,"Content-Type":"application/json"},body:JSON.stringify({refresh_token:saved.refresh_token}),signal:controller.signal});
       const data=await res.json();
-      if(!res.ok||!data.access_token){ccRefreshInvalid=[400,401,403].includes(res.status);return false;}
+      if(!res.ok||!data.access_token){ccRefreshInvalid=[400,401,403].includes(res.status);ccRefreshReason="REFRESH-HTTP-"+res.status;return false;}
       saveSession(data);currentUser=data.user||currentUser;return true;
-    }catch(error){console.error('Session refresh failed',error);return false;}
+    }catch(error){ccRefreshReason=error.name==='AbortError'?'REFRESH-TIMEOUT':'REFRESH-CONNECTION';console.error('Session refresh failed',error);return false;}
     finally{clearTimeout(timer);}
   })();
   try{return await ccRefreshPromise;}finally{ccRefreshPromise=null;}
@@ -3931,25 +3932,41 @@ document.addEventListener('DOMContentLoaded', async()=>{
   if(!restored){window.ccStartupUI.finish();return;}
   try{
     let verified;
+    let renewed=false;
+    // Renew known-expired (or nearly expired) tokens before asking for the user.
+    // Supabase includes expires_at; older saved sessions may only have a JWT exp.
+    let expires=Number(restored.expires_at)||0;
+    if(!expires){try{const raw=restored.access_token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');expires=Number(JSON.parse(atob(raw)).exp)||0;}catch(_){}}
+    const renew=async()=>{
+      if(!await refreshSession()){
+        const error=new Error('Unable to renew your saved session.');
+        error.status=ccRefreshInvalid?401:0;
+        error.startupCode=ccRefreshReason||'REFRESH-FAILED';throw error;
+      }
+      renewed=true;
+    };
+    if(expires&&expires<=Math.floor(Date.now()/1000)+60)await renew();
     try{verified=await supabaseRequest('/auth/v1/user',{},false);}
     catch(error){
-      if(error.status!==401)throw error;
-      if(!await refreshSession()){
-        if(ccRefreshInvalid){error.status=401;throw error;}
-        throw new Error('Unable to reconnect to your account.');
+      // Auth user validation may reject an old token with either status.
+      // This does not relax any database permissions or retry REST permission errors.
+      if(![401,403].includes(error.status)||renewed){
+        error.startupCode=error.status?'VERIFY-HTTP-'+error.status:(error.name==='AbortError'?'VERIFY-TIMEOUT':'VERIFY-CONNECTION');throw error;
       }
-      verified=await supabaseRequest('/auth/v1/user',{},false);
+      await renew();
+      try{verified=await supabaseRequest('/auth/v1/user',{},false);}
+      catch(error){error.startupCode=error.status?'VERIFY-AFTER-REFRESH-HTTP-'+error.status:'VERIFY-AFTER-REFRESH-CONNECTION';throw error;}
     }
     if(!verified?.id)throw new Error('Account verification did not return a user.');
     await startApp(verified);
   }catch(error){
     console.error('Session restoration failed',error);
-    if(error.status===401||ccRefreshInvalid){
+    if([401,403].includes(error.status)||ccRefreshInvalid){
       clearSession();currentUser=null;authGate.style.display='grid';
-      setAuthMessage('Your session has expired. Please sign in again.',true);
+      setAuthMessage('Your saved session could not be renewed. Please sign in again. ('+(error.startupCode||'SESSION-EXPIRED')+')',true);
       window.ccStartupUI.finish();
     }else{
-      window.ccStartupUI.fail('We could not reconnect to your account. Check your internet connection and try again.');
+      window.ccStartupUI.fail('We could not reconnect to your account. Check your internet connection and try again. Code: '+(error.startupCode||'STARTUP-VERIFY')+'.');
     }
   }
 },{once:true});
